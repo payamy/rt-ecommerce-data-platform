@@ -1,3 +1,4 @@
+import asyncio
 import random
 import uuid
 from dataclasses import dataclass
@@ -6,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.generator.generator import Event, EventGenerator
+from src.producer.kafka_producer import KafkaEventProducer
 
 
 @dataclass
@@ -30,10 +32,12 @@ class SessionGenerator:
     def __init__(
         self,
         event_generator: EventGenerator,
+        producer: KafkaEventProducer,
         seed: int | None = None,
     ):
         self.event_generator = event_generator
         self.random = random.Random(seed)
+        self.producer = producer
 
     def _create_session(self) -> Session:
         user_id = self.random.randint(1, 100_000)
@@ -45,10 +49,12 @@ class SessionGenerator:
             is_fraudulent=self.random.random() < self.FRAUD_RATE,
         )
 
-    def generate_session(self) -> list[Event]:
+    async def generate_session(self) -> None:
         session = self._create_session()
 
-        events: list[Event] = [self.event_generator.user_logged_in()]
+        await self.__send_event(self.event_generator.user_logged_in())
+        # A delay after logging in
+        await asyncio.sleep(self.random.randint(1, 10))
 
         # Number of products the user views.
         view_count = self.random.randint(1, 6)
@@ -67,7 +73,7 @@ class SessionGenerator:
             product_id = product.iloc[0, 0]
             merchant_id = product.iloc[0, 3]
 
-            events.append(
+            await self.__send_event(
                 self.event_generator.product_viewed(
                     user_id=session.user_id,
                     session_id=session.session_id,
@@ -76,6 +82,8 @@ class SessionGenerator:
                     merchant_id=merchant_id,
                 )
             )
+            # A delay to see if the product is what customer wants
+            await asyncio.sleep(self.random.randint(1, 3))
 
             # ---------------------------------------------------------
             # 2. User decides whether to add something to cart
@@ -87,7 +95,7 @@ class SessionGenerator:
 
             amount += product.iloc[0, 4]
 
-            events.append(
+            await self.__send_event(
                 self.event_generator.product_added_to_cart(
                     user_id=session.user_id,
                     session_id=session.session_id,
@@ -96,6 +104,8 @@ class SessionGenerator:
                     merchant_id=merchant_id,
                 )
             )
+            # A delay after adding item to cart
+            await asyncio.sleep(self.random.randint(3, 6))
 
         # ---------------------------------------------------------
         # 3. Checkout
@@ -103,15 +113,18 @@ class SessionGenerator:
 
         # Some users abandon their cart.
         if self.random.random() > 0.4 or amount == 0:
-            return events
+            return
 
-        events.append(
+
+        await self.__send_event(
             self.event_generator.checkout_started(
                 user_id=session.user_id,
                 session_id=session.session_id,
                 device_id=session.device_id,
             )
         )
+        # A delay after adding item to cart
+        await asyncio.sleep(self.random.randint(3, 6))
 
         # ---------------------------------------------------------
         # 4. Payment
@@ -124,7 +137,9 @@ class SessionGenerator:
             amount=round(amount, 2),
         )
 
-        events.append(payment)
+        await self.__send_event(payment)
+        # A delay after attempting payment
+        await asyncio.sleep(self.random.randint(5, 10))
 
         # ---------------------------------------------------------
         # 5. Payment outcome
@@ -140,7 +155,7 @@ class SessionGenerator:
                 payment_method=payment.payment_method,
             )
 
-            events.append(completed)
+            await self.__send_event(completed)
 
             # Small percentage of successful transactions get refunded.
             if self.random.random() < 0.05:
@@ -149,8 +164,10 @@ class SessionGenerator:
                     * self.random.uniform(0.25, 1.0),
                     2,
                 )
+                # A delay after before refund operation
+                await asyncio.sleep(self.random.randint(3, 6))
 
-                events.append(
+                await self.__send_event(
                     self.event_generator.refund_created(
                         user_id=session.user_id,
                         session_id=session.session_id,
@@ -168,7 +185,7 @@ class SessionGenerator:
                 payment_method=payment.payment_method,
             )
 
-            events.append(failed)
+            await self.__send_event(failed)
 
             # 40% of failed payments are retried.
             if self.random.random() < 0.40:
@@ -185,11 +202,13 @@ class SessionGenerator:
                 retry.merchant_id = payment.merchant_id
                 retry.payment_method = payment.payment_method
 
-                events.append(retry)
+                await self.__send_event(retry)
 
                 # 70% of retries succeed.
                 if self.random.random() < 0.70:
-                    events.append(
+                    # A delay after before retry
+                    await asyncio.sleep(self.random.randint(3, 6))
+                    await self.__send_event(
                         self.event_generator.payment_completed(
                             user_id=session.user_id,
                             session_id=session.session_id,
@@ -199,23 +218,11 @@ class SessionGenerator:
                         )
                     )
 
-        # Generate random duplicates
-        events = self.__generate_duplicate(events)
+        self.producer.flush()
 
-        return events
 
-    def __generate_duplicate(
-            self,
-            events: list[Event],
-            probability: float = 0.02,
-    ) -> list[Event]:
-
-        result = []
-
-        for event in events:
-            result.append(event)
-
-            if self.random.random() < probability:
-                result.append(event)
-
-        return result
+    async def __send_event(self, event: Event, probability: float = 0.02) -> None:
+        self.producer.publish(event)
+        if self.random.random() < probability:
+            await asyncio.sleep(self.random.randint(5, 10))
+            self.producer.publish(event)

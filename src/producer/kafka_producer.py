@@ -23,7 +23,8 @@ class KafkaEventProducer:
             print(
                 f"Delivered to {message.topic()} "
                 f"[{message.partition()}] "
-                f"offset={message.offset()}"
+                f"offset={message.offset()} "
+                f"key={message.key()} "
             )
 
     def publish(self, event: Event) -> None:
