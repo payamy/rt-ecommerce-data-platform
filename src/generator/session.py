@@ -34,7 +34,11 @@ class SessionGenerator:
         event_generator: EventGenerator,
         producer: KafkaEventProducer,
         seed: int | None = None,
+        fraud_rate: float = FRAUD_RATE,
     ):
+        if not 0 <= fraud_rate <= 1:
+            raise ValueError("fraud_rate must be between 0 and 1")
+        self.fraud_rate = fraud_rate
         self.event_generator = event_generator
         self.random = random.Random(seed)
         self.producer = producer
@@ -46,13 +50,21 @@ class SessionGenerator:
             user_id=user_id,
             session_id=str(uuid.uuid4()),
             device_id=str(uuid.uuid4()),
-            is_fraudulent=self.random.random() < self.FRAUD_RATE,
+            is_fraudulent=self.random.random() < self.fraud_rate,
         )
 
     async def generate_session(self) -> None:
         session = self._create_session()
 
-        await self.__send_event(self.event_generator.user_logged_in())
+        await self.__send_event(self.event_generator.user_logged_in(
+            user_id=session.user_id,
+            session_id=session.session_id,
+            device_id=session.device_id,
+        ))
+        if session.is_fraudulent:
+            await self._generate_fraudulent_session(session)
+            self.producer.flush()
+            return
         # A delay after logging in
         await asyncio.sleep(self.random.randint(1, 10))
 
@@ -220,6 +232,45 @@ class SessionGenerator:
 
         self.producer.flush()
 
+
+    async def _generate_fraudulent_session(self, session: Session) -> None:
+        """Emit suspicious ordinary events, keeping the fraud label internal."""
+        products_file = Path(__file__).parent.parent.parent / "files" / "products.csv"
+        products = pd.read_csv(products_file)
+        product = products.iloc[self.random.randrange(len(products))]
+        context = dict(
+            user_id=session.user_id,
+            session_id=session.session_id,
+            device_id=session.device_id,
+        )
+        item = dict(product_id=product["product_id"], merchant_id=product["merchant_id"])
+        await self.__send_event(self.event_generator.product_viewed(**context, **item), probability=0)
+        await self.__send_event(self.event_generator.product_added_to_cart(**context, **item), probability=0)
+        await self.__send_event(self.event_generator.checkout_started(**context), probability=0)
+
+        # Card testing uses small charges; large purchase attempts use a
+        # substantial multiple of the catalog price. Both have high velocity.
+        card_testing = self.random.choice([True, False])
+        amount = round(self.random.uniform(1, 5) if card_testing else
+                       float(product["amount"]) * self.random.uniform(20, 50), 2)
+        attempt_count = self.random.randint(6, 12)
+        for attempt in range(attempt_count):
+            payment = self.event_generator.payment_attempted(
+                **context, amount=amount, payment_method="card",
+            )
+            await self.__send_event(payment, probability=0)
+            await asyncio.sleep(self.random.uniform(0.1, 0.5))
+            # Most attempts fail; occasionally the final attempt succeeds.
+            if attempt == attempt_count - 1 and self.random.random() < 0.25:
+                outcome = self.event_generator.payment_completed(
+                    **context, amount=amount, payment_method=payment.payment_method,
+                )
+            else:
+                outcome = self.event_generator.payment_failed(
+                    **context, amount=amount, payment_method=payment.payment_method,
+                    failure_reason=self.random.choice(["card_declined", "fraud_suspected"]),
+                )
+            await self.__send_event(outcome, probability=0)
 
     async def __send_event(self, event: Event, probability: float = 0.02) -> None:
         self.producer.publish(event)

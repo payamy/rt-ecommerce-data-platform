@@ -54,7 +54,7 @@ The long-term goal is to build an end-to-end data platform that supports both re
          API Consumers
 ```
 
-This diagram represents the intended architecture. Components beyond the generator and Kafka infrastructure are planned and may change as the project develops.
+This diagram represents the intended architecture. The generator, Kafka infrastructure, PySpark fraud transformations, and Kafka-to-ClickHouse processing application are implemented. Historical storage and API components are planned and may change as the project develops.
 
 ### Technology stack
 
@@ -89,4 +89,7 @@ rt-ecommerce-data-platform/
 * `src/generator/generator.py`: Generates individual e-commerce events.
 * `src/generator/session.py`: Coordinates events into user sessions and simulates delays between them.
 * `src/producer/kafka_producer.py`: Encapsulates Kafka producer configuration and event publishing.
+* `src/processing/`: Source-independent PySpark streaming and batch session fraud labeling. See [processing usage and semantics](src/processing/README.md).
+* `src/processing/main.py`: Kafka-to-ClickHouse streaming application with durable checkpoints.
+* `docker-compose-clickhouse.yaml`: Local persistent ClickHouse service for processing results.
 * `docker-compose.yml`: Defines the local Kafka infrastructure.

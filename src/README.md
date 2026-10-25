@@ -194,7 +194,18 @@ Potential scenarios include:
 
 A hidden ground-truth label may be retained separately for evaluating fraud-detection results, but it should not be included in the normal event stream consumed by the processing pipeline.
 
-These scenarios are planned simulation capabilities unless they have already been implemented in the generator.
+By default, 2% of sessions simulate suspicious activity. Set `fraud_rate` on
+`SessionGenerator` to a value from 0 to 1 to adjust this proportion (0 disables
+it; 1 makes every session suspicious).
+
+Suspicious sessions browse a product, add it to their cart, and start checkout,
+then make 6–12 card payment attempts with 0.1–0.5 second waits before each outcome.
+They either test small charges of 1–5 currency units or attempt a purchase worth
+20–50 times the catalog price. Repeated failures use `card_declined` or
+`fraud_suspected`; the final attempt has a 25% chance of succeeding. Each attempt
+has a matching outcome with the same amount and payment method. All session
+events share user, session, and device identifiers. The internal `is_fraudulent`
+flag is never serialized into events.
 
 ## Kafka Infrastructure
 

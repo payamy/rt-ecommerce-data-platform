@@ -75,10 +75,15 @@ class EventGenerator:
             device_id=device_id,
         )
 
-    def user_logged_in(self) -> Event:
-        user_id = self.random.randint(1, 100_000)
-        session_id = str(uuid.uuid4())
-        device_id = str(uuid.uuid4())
+    def user_logged_in(
+        self,
+        user_id: int | None = None,
+        session_id: str | None = None,
+        device_id: str | None = None,
+    ) -> Event:
+        user_id = user_id if user_id is not None else self.random.randint(1, 100_000)
+        session_id = session_id if session_id is not None else str(uuid.uuid4())
+        device_id = device_id if device_id is not None else str(uuid.uuid4())
 
         return self._base_event(
             event_type=EventType.USER_REGISTERED,
@@ -148,6 +153,7 @@ class EventGenerator:
         session_id: str,
         device_id: str,
         amount: float,
+        payment_method: str | None = None,
     ) -> Event:
         event = self._base_event(
             event_type=EventType.PAYMENT_ATTEMPTED,
@@ -157,8 +163,9 @@ class EventGenerator:
         )
 
         event.amount = amount
-        event.payment_method = self.random.choice(
-            self.PAYMENT_METHODS
+        event.payment_method = (
+            payment_method if payment_method is not None
+            else self.random.choice(self.PAYMENT_METHODS)
         )
 
         return event
@@ -189,6 +196,7 @@ class EventGenerator:
         device_id: str,
         amount: float,
         payment_method: str,
+        failure_reason: str | None = None,
     ) -> Event:
         event = self._base_event(
             event_type=EventType.PAYMENT_FAILED,
@@ -199,8 +207,9 @@ class EventGenerator:
 
         event.amount = amount
         event.payment_method = payment_method
-        event.failure_reason = self.random.choice(
-            self.FAILURE_REASONS
+        event.failure_reason = (
+            failure_reason if failure_reason is not None
+            else self.random.choice(self.FAILURE_REASONS)
         )
 
         return event
