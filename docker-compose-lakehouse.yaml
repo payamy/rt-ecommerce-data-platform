@@ -1,0 +1,172 @@
+
+x-spark: &spark
+  platform: ${LAKEHOUSE_PLATFORM:-linux/arm64}
+  image: ecommerce-lakehouse-spark:3.5.7
+  build: ./docker/lakehouse/spark
+  restart: unless-stopped
+  volumes:
+    - lakehouse-data:/lakehouse
+    - ./src:/workspace/src:ro
+    - ./docker/lakehouse/register-tables.sql:/workspace/register-tables.sql:ro
+
+services:
+  storage-init:
+    platform: ${LAKEHOUSE_PLATFORM:-linux/arm64}
+    image: busybox:1.37.0
+    user: root
+    command: [sh, -c, 'mkdir -p /lakehouse/warehouse/ecommerce.db /lakehouse/checkpoints && chmod -R 0777 /lakehouse']
+    volumes:
+      - lakehouse-data:/lakehouse
+    restart: "no"
+
+  metastore-db:
+    platform: ${LAKEHOUSE_PLATFORM:-linux/arm64}
+    image: postgres:16.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive-local-dev
+    volumes:
+      - metastore-db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U hive -d metastore']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  hive-metastore:
+    hostname: hive-metastore
+    build: ./docker/lakehouse/hive
+    platform: ${LAKEHOUSE_PLATFORM:-linux/arm64}
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://metastore-db:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive-local-dev
+        -Dhive.metastore.warehouse.dir=file:///lakehouse/warehouse
+    ports:
+      - "127.0.0.1:9083:9083"
+    volumes:
+      - lakehouse-data:/lakehouse
+    depends_on:
+      metastore-db:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, bash, -c, 'echo > /dev/tcp/localhost/9083']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  spark-master:
+    <<: *spark
+    hostname: spark-master
+    command: [/opt/spark/bin/spark-class, org.apache.spark.deploy.master.Master, --host, spark-master, --port, "7077", --webui-port, "8080"]
+    ports:
+      - "127.0.0.1:7077:7077"
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, bash, -c, 'echo > /dev/tcp/spark-master/7077']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  spark-worker:
+    <<: *spark
+    networks:
+      - default
+      - kafka
+    command: [/opt/spark/bin/spark-class, org.apache.spark.deploy.worker.Worker, --cores, "4", --memory, 4g, --webui-port, "8081", 'spark://spark-master:7077']
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, bash, -c, 'echo > /dev/tcp/localhost/8081']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  spark-thriftserver:
+    <<: *spark
+    hostname: spark-thriftserver
+    # Keep both Spark's configured Ivy cache and Hive's user.home cache across
+    # container recreation. Dedicated volumes avoid concurrent app resolution.
+    volumes:
+      - lakehouse-data:/lakehouse
+      - ./src:/workspace/src:ro
+      - ./docker/lakehouse/register-tables.sql:/workspace/register-tables.sql:ro
+      - thriftserver-ivy:/tmp/ivy
+      - thriftserver-home:/home/spark
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+    command:
+      - /opt/spark/sbin/start-thriftserver.sh
+      - --conf
+      - spark.driver.host=spark-thriftserver
+      - --conf
+      - spark.driver.bindAddress=0.0.0.0
+      - --hiveconf
+      - hive.server2.thrift.bind.host=0.0.0.0
+      - --hiveconf
+      - hive.server2.thrift.port=10000
+      - --hiveconf
+      - hive.server2.authentication=NONE
+    ports:
+      - "127.0.0.1:10000:10000"
+      - "127.0.0.1:4040:4040"
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, bash, -c, 'echo > /dev/tcp/localhost/10000']
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  lakehouse-app:
+    <<: *spark
+    profiles: [app]
+    hostname: lakehouse-app
+    restart: "no"
+    environment:
+      PYSPARK_SUBMIT_ARGS: --conf spark.driver.host=lakehouse-app --conf spark.driver.bindAddress=0.0.0.0 pyspark-shell
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:19092,kafka-2:19092,kafka-3:19092
+    command: [python3, -m, src.lakehouse.main, --root, /lakehouse/warehouse, --checkpoints, /lakehouse/checkpoints]
+    networks:
+      - default
+      - kafka
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
+
+volumes:
+  lakehouse-data:
+  metastore-db:
+  thriftserver-ivy:
+  thriftserver-home:
+
+networks:
+  # Hive canonicalizes the metastore address via reverse DNS. Docker's default
+  # <project>_default name introduces an underscore into that URI hostname.
+  default:
+    name: rt-ecommerce-lakehouse-net
+  kafka:
+    external: true
+    name: ${LAKEHOUSE_KAFKA_NETWORK:-rt-ecommerce-data-platform_kafka-net}

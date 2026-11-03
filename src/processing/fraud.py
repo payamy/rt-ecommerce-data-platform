@@ -1,5 +1,7 @@
 """Shared Structured Streaming and batch transformations; no I/O is started here."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 from pyspark.sql import DataFrame, functions as F, types as T

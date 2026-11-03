@@ -17,7 +17,8 @@ def arguments(argv=None):
         "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092,localhost:9093,localhost:9094"))
     parser.add_argument("--topic", default=os.getenv("KAFKA_TOPIC", "ecommerce-events"))
     parser.add_argument("--starting-offsets", choices=("earliest", "latest"), default="earliest")
-    parser.add_argument("--checkpoints", required=True, help="Stable, durable checkpoints path/URI")
+    parser.add_argument("--checkpoints", "--checkpoint", dest="checkpoint", required=True,
+                        help="Stable, durable checkpoints path/URI")
     parser.add_argument("--trigger-seconds", type=int, default=30)
     parser.add_argument("--max-offsets-per-trigger", type=int, default=100000)
     parser.add_argument("--clickhouse-url", default=os.getenv("CLICKHOUSE_URL", "http://localhost:8123"))
